@@ -4,8 +4,8 @@ import argparse
 from dotenv import load_dotenv
 from typing import Dict, Any, List
 import sys
-import pysqlite3
-sys.modules["sqlite3"] = pysqlite3
+import sqlite3
+sys.modules["sqlite3"] = sqlite3
 
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -15,6 +15,10 @@ from langchain_ollama import OllamaEmbeddings
 
 from utils_docs import build_documents
 from pymongo import MongoClient
+
+from pathlib import Path
+ENV_PATH = Path(__file__).resolve().parent / ".env"
+load_dotenv(dotenv_path=ENV_PATH, override=True)
 
 load_dotenv()
 MONGO_URI = os.environ.get("MONGO_URI")

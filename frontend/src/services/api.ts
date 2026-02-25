@@ -3,7 +3,7 @@ import axios from "axios";
 // 🚀 PRODUCTION MODE
 export const USE_MOCK = false; 
 
-const API_BASE_URL = "https://carmen-bikini-ferry-cooling.trycloudflare.com"; 
+const API_BASE_URL = "http://127.0.0.1:8000"; 
 
 const api = axios.create({
   baseURL: API_BASE_URL,
@@ -50,7 +50,6 @@ export interface DeleteResponse {
   message: string;
 }
 
-// --- API FUNCTIONS (Connected to Cloudflare) ---
 
 export const uploadFile = async (file: File): Promise<UploadResponse> => {
   // If we accidentally left mock mode on, warn the developer

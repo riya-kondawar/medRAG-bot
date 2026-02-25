@@ -247,8 +247,8 @@ def main():
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(safe_output, f, ensure_ascii=False, indent=2,cls=MongoJSONEncoder)
 
-    print(f"✅ OCR Processed and saved to Mongo ID: {ocr_doc_id}")
-    print(f"📄 Local JSON saved: {os.path.abspath(args.out)}")
+    print(f"OCR Processed and saved to Mongo ID: {ocr_doc_id}")
+    print(f"Local JSON saved: {os.path.abspath(args.out)}")
 
 if __name__ == "__main__":
     main()
