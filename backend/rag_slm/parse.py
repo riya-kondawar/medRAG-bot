@@ -5,8 +5,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 # ---------------- helpers ----------------
 
-def norm_spaces(s: str) -> str:
-    return re.sub(r"\s+", " ", s).strip()
+def norm_spaces(s: Any) -> str:
+    if s is None:
+        return ""
+    return re.sub(r"\s+", " ", str(s)).strip()
 
 def clean_unit(u: str) -> str:
     u = norm_spaces(u)
@@ -126,6 +128,107 @@ def choose_best_result(nums: List[str], ref_low: Optional[float], ref_high: Opti
                 return v
 
     return max(vals)
+
+
+def format_number(v: Any) -> str:
+    if v is None:
+        return ""
+    try:
+        fv = float(v)
+        if fv.is_integer():
+            return str(int(fv))
+        return f"{fv:.2f}".rstrip("0").rstrip(".")
+    except Exception:
+        return norm_spaces(str(v))
+
+
+def build_reference_range(low: Optional[float], high: Optional[float]) -> str:
+    low_s = format_number(low)
+    high_s = format_number(high)
+    if low_s and high_s:
+        return f"{low_s} - {high_s}"
+    if low_s:
+        return f">= {low_s}"
+    if high_s:
+        return f"<= {high_s}"
+    return ""
+
+
+def estimate_confidence(test: Dict[str, Any]) -> float:
+    # Heuristic confidence score based on completeness of extracted fields.
+    score = 0.55
+    if test.get("result") is not None:
+        score += 0.20
+    if norm_spaces(test.get("unit", "")):
+        score += 0.10
+    if test.get("ref_low") is not None and test.get("ref_high") is not None:
+        score += 0.10
+    if test.get("flag") in ("H", "L"):
+        score += 0.05
+    return round(min(score, 0.99), 2)
+
+
+def build_structured_tests(raw_tests: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    structured: List[Dict[str, Any]] = []
+
+    for t in raw_tests:
+        test_name = norm_spaces(t.get("name", ""))
+        if not test_name:
+            continue
+
+        structured.append(
+            {
+                "test_name": test_name,
+                "value": format_number(t.get("result")),
+                "unit": clean_unit(t.get("unit") or ""),
+                "reference_range": build_reference_range(t.get("ref_low"), t.get("ref_high")),
+                "confidence": estimate_confidence(t),
+            }
+        )
+
+    return structured
+
+
+def build_abnormal_summary(raw_tests: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    abnormal: List[Dict[str, Any]] = []
+
+    for t in raw_tests:
+        flag = t.get("flag")
+        res = t.get("result")
+        lo = t.get("ref_low")
+        hi = t.get("ref_high")
+
+        if flag not in ("H", "L") and res is not None and lo is not None and hi is not None:
+            if res < lo:
+                flag = "L"
+            elif res > hi:
+                flag = "H"
+
+        if flag in ("H", "L"):
+            abnormal.append(
+                {
+                    "name": norm_spaces(t.get("name", "")),
+                    "result": format_number(res),
+                    "unit": clean_unit(t.get("unit") or ""),
+                    "flag": flag,
+                    "ref_low": format_number(lo),
+                    "ref_high": format_number(hi),
+                }
+            )
+
+    return abnormal
+
+
+def derive_report_id(ocr: Dict[str, Any]) -> str:
+    report_id = (
+        ocr.get("report_id")
+        or ocr.get("ocr_doc_id")
+        or ocr.get("source")
+        or ocr.get("input")
+        or ocr.get("input_path")
+        or "unknown"
+    )
+    return str(report_id)
 
 # ---------------- patient info extraction ----------------
 
@@ -375,33 +478,24 @@ def main():
 
     # Collect all rows across pages
     rows: List[str] = []
-    for p in ocr.get("pages", []):
-        rows.extend(p.get("rows", []))
+    pages = ocr.get("pages", [])
+    if isinstance(pages, list):
+        for p in pages:
+            if not isinstance(p, dict):
+                continue
+            page_rows = p.get("rows", [])
+            if isinstance(page_rows, list):
+                rows.extend([str(r) for r in page_rows if isinstance(r, str)])
 
     patient_info = extract_patient_info(rows)
-    tests = extract_tests(rows)
+    raw_tests = extract_tests(rows)
+    tests = build_structured_tests(raw_tests)
     report_type = detect_report_type(rows)
-
-    abnormal = []
-    for t in tests:
-        flag = t.get("flag")
-        if flag in ("H", "L"):
-            abnormal.append(t)
-            continue
-        # If no explicit flag, infer abnormal by range
-        res = t.get("result")
-        lo = t.get("ref_low")
-        hi = t.get("ref_high")
-        if res is not None and lo is not None and hi is not None:
-            if res < lo:
-                t["flag"] = t.get("flag") or "L"
-                abnormal.append(t)
-            elif res > hi:
-                t["flag"] = t.get("flag") or "H"
-                abnormal.append(t)
+    abnormal = build_abnormal_summary(raw_tests)
 
     output = {
-        "source": ocr.get("input"),
+        "report_id": derive_report_id(ocr),
+        "source": ocr.get("input") or ocr.get("input_path"),
         "patient_info": patient_info,
         "report_type": report_type,
         "tests": tests,

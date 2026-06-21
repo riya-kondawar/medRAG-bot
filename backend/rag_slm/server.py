@@ -6,6 +6,7 @@ import uuid
 import sys
 import io
 import gridfs
+import logging
 from typing import List, Optional
 from datetime import datetime
 from pathlib import Path
@@ -40,6 +41,12 @@ print("ENV exists =", ENV_PATH.exists())
 print("CWD =", os.getcwd())
 print("PYTHON =", sys.executable)
 print("MONGO_URI loaded =", bool(os.getenv("MONGO_URI")))
+
+logging.basicConfig(
+    level=os.getenv("MEDRAG_LOG_LEVEL", "INFO"),
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+logger = logging.getLogger("medrag.server")
 
 # Use a stable persist dir (do NOT rely on os.getcwd())
 PERSIST_DIR = str(RAG_DIR / "vectordb")
@@ -113,6 +120,8 @@ def run_cmd(cmd: List[str], *, cwd: Path) -> str:
         cwd=str(cwd),
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         env=env,
     )
     if p.returncode != 0:
@@ -145,6 +154,7 @@ def root():
 @app.post("/upload")
 async def upload_report(file: UploadFile = File(...)):
     session_id = str(uuid.uuid4())
+    logger.info("upload_start session_id=%s filename=%s", session_id, file.filename)
 
     # Save upload to a deterministic temp file inside backend dir
     temp_path = BACKEND_DIR / f"temp_{session_id}_{file.filename}"
@@ -177,46 +187,81 @@ async def upload_report(file: UploadFile = File(...)):
         with open(ocr_json, "r", encoding="utf-8") as f:
             ocr_result = json.load(f)
 
-        mongo_report_id = ocr_result.get("ocr_doc_id")
+        mongo_report_id = str(ocr_result.get("ocr_doc_id") or "")
         actual_file_id = ocr_result.get("mongo_file_id")
 
         if not mongo_report_id:
             raise ValueError("ocr_doc_id missing from OCR output")
 
+        # Return structured analysis JSON + persist in Mongo before ingestion.
+        with open(structured_json, "r", encoding="utf-8") as f:
+            analysis_data = json.load(f)
+
+        analysis_data["report_id"] = str(analysis_data.get("report_id") or mongo_report_id)
+
+        structured_doc = {
+            "session_id": session_id,
+            "report_id": analysis_data["report_id"],
+            "parsed_data": analysis_data,
+            "created_at": datetime.utcnow(),
+        }
+        structured_insert = mongo_client["medrag"]["structured_reports"].insert_one(structured_doc)
+        logger.info(
+            "structured_saved session_id=%s report_id=%s tests=%s structured_doc_id=%s",
+            session_id,
+            analysis_data["report_id"],
+            len(analysis_data.get("tests", [])),
+            structured_insert.inserted_id,
+        )
+
         # 3) Save Session mapping
         session_data = {
             "session_id": session_id,
-            "report_id": mongo_report_id,
+            "report_id": analysis_data["report_id"],
+            "ocr_report_id": mongo_report_id,
             "file_id": actual_file_id,
             "filename": file.filename,
+            "structured_doc_id": str(structured_insert.inserted_id),
             "created_at": datetime.utcnow(),
         }
         mongo_client["medrag"]["sessions"].insert_one(session_data)
+        logger.info(
+            "session_saved session_id=%s report_id=%s ocr_report_id=%s",
+            session_id,
+            analysis_data["report_id"],
+            mongo_report_id,
+        )
 
         # 4) Ingest into Chroma (capture stdout/stderr)
-        run_cmd(
+        logger.info("ingest_start session_id=%s collection=%s", session_id, f"sess_{session_id}")
+        ingest_stdout = run_cmd(
             [
                 py,
                 str(ingest_py),
                 "--mongo",
                 "--collection",
                 f"sess_{session_id}",
+                "--session_id",
+                session_id,
                 "--report_id",
-                str(mongo_report_id),
+                str(analysis_data["report_id"]),
                 "--persist_dir",
                 str(RAG_DIR / "vectordb"),
             ],
             cwd=BACKEND_DIR,
         )
-
-        # Return structured analysis JSON
-        with open(structured_json, "r", encoding="utf-8") as f:
-            analysis_data = json.load(f)
+        logger.info(
+            "ingest_output session_id=%s details=%s",
+            session_id,
+            ingest_stdout.replace("\n", " | ").strip(),
+        )
+        logger.info("ingest_complete session_id=%s", session_id)
 
         return {"status": "success", "session_id": session_id, "analysis": analysis_data}
 
     except Exception as e:
         # Return rich error to client for debugging
+        logger.exception("upload_failed session_id=%s filename=%s", session_id, file.filename)
         return {"status": "error", "message": str(e), "session_id": session_id}
 
     finally:
@@ -228,6 +273,7 @@ async def upload_report(file: UploadFile = File(...)):
 
 @app.post("/ask", response_model=AskResponse)
 def ask(req: AskRequest):
+    logger.info("ask_start session_id=%s top_k=%s question_len=%s", req.session_id, req.top_k, len(req.question or ""))
     collection_name = f"sess_{req.session_id}"
 
     db = Chroma(
@@ -238,9 +284,17 @@ def ask(req: AskRequest):
 
     count = db._collection.count()
     if count == 0:
+        logger.warning("ask_no_data session_id=%s", req.session_id)
         return AskResponse(answer="No medical data found for this session.", chunks=[])
 
     results = db.similarity_search_with_score(req.question, k=req.top_k)
+    structured_hits = sum(1 for doc, _ in results if doc.metadata.get("type") == "structured")
+    logger.info(
+        "ask_retrieval session_id=%s hits=%s structured_hits=%s",
+        req.session_id,
+        len(results),
+        structured_hits,
+    )
 
     chunks = [
         Chunk(
@@ -270,6 +324,8 @@ async def delete_all(req: DeleteRequest):
         if not records:
             return {"status": "warning", "message": "No records found for this session."}
 
+        db["structured_reports"].delete_many({"session_id": session_id})
+
         for rec in records:
             if "file_id" in rec:
                 try:
@@ -279,7 +335,11 @@ async def delete_all(req: DeleteRequest):
 
             if "report_id" in rec:
                 try:
-                    db["structured_reports"].delete_many({"_id": ObjectId(rec["report_id"])})
+                    db["structured_reports"].delete_many({"report_id": str(rec["report_id"])})
+                except Exception:
+                    pass
+                try:
+                    db["ocr_reports"].delete_many({"_id": ObjectId(rec["report_id"])})
                 except Exception:
                     pass
                 try:

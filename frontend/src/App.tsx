@@ -118,14 +118,13 @@ export default function App() {
                     </div>
                  </div>
               </div>
-
               <div className="order-1 md:order-2 flex justify-center">
-                <div className="relative w-full aspect-square max-w-sm bg-blue-100 rounded-full flex items-center justify-center overflow-hidden">
-                    <img 
-                        src="https://img.freepik.com/free-vector/robotic-artificial-intelligence-technology-smart-doctor-futuristic-disease-diagnosis-online-medical-consultation_1150-50596.jpg?w=740&t=st=1708323000~exp=1708323600~hmac=example" 
-                        alt="Medical AI" 
-                        className="object-cover opacity-90 hover:scale-105 transition-transform duration-700"
-                    />
+                <div className="relative w-full aspect-square max-w-sm bg-blue-100 rounded-full flex items-center justify-center overflow-hidden border-3 border-blue-500">
+                  <img 
+                    src="/medrag-logo.png"
+                    alt="MedRAG Logo" 
+                    className="object-cover rounded-full opacity-90 hover:scale-105 transition-transform duration-700"
+                  />
                 </div>
               </div>
             </div>
